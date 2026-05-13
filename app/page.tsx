@@ -20,9 +20,14 @@ const formatBytes = (bytes: number) => {
 
 export default function ForensicScannerUI() {
   const { db, isLoading: isDbLoading } = useDuckDB();
-  const [activeTab, setActiveTab] = useState<'script' | 'viewer' | 'about'>('script');
+  const [reportA, setReportA] = useState<any>(null);
+  const [reportB, setReportB] = useState<any>(null);
+  const [diffResults, setDiffResults] = useState<any>(null);
+  const [uploadTarget, setUploadTarget] = useState<'a' | 'b'>('a');
+  const activeReport = uploadTarget === 'a' ? reportA : reportB;
+  
+  const [activeTab, setActiveTab] = useState<'script' | 'viewer' | 'diff' | 'about'>('script');
   const [copied, setCopied] = useState(false);
-  const [reportData, setReportData] = useState<any>(null);
   const [viewerMode, setViewerMode] = useState<'overview' | 'files' | 'dupes'>('overview');
   const [searchQuery, setSearchQuery] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
@@ -33,7 +38,7 @@ export default function ForensicScannerUI() {
 
   // Effect for searching files in DuckDB
   useEffect(() => {
-    if (!db || reportData?.isParquet !== true) return;
+    if (!db || activeReport?.isParquet !== true) return;
     let isActive = true;
     const searchFiles = async () => {
       const conn = await db.connect();
@@ -51,11 +56,11 @@ export default function ForensicScannerUI() {
     };
     searchFiles();
     return () => { isActive = false; };
-  }, [db, reportData, searchQuery]);
+  }, [db, activeReport, searchQuery]);
 
   // Effect for initializing Dupes in DuckDB
   useEffect(() => {
-    if (!db || reportData?.isParquet !== true) return;
+    if (!db || activeReport?.isParquet !== true) return;
     let isActive = true;
     const loadDupes = async () => {
        const conn = await db.connect();
@@ -94,7 +99,7 @@ export default function ForensicScannerUI() {
     }
     loadDupes();
     return () => { isActive = false; };
-  }, [db, reportData]);
+  }, [db, activeReport]);
 
 
   const handleCopy = () => {
@@ -144,7 +149,7 @@ export default function ForensicScannerUI() {
            file_type_statistics[row.lang] = { count: Number(row.count), total_size_bytes: Number(row.total_size_bytes) };
         });
         
-        setReportData({
+        const reportObj = {
           isParquet: true,
           metadata: {
              volume_name: file.name,
@@ -156,7 +161,9 @@ export default function ForensicScannerUI() {
              platform: "DuckDB"
           },
           errors: []
-        });
+        };
+        if (uploadTarget === 'a') setReportA(reportObj);
+        else setReportB(reportObj);
         setActiveTab('viewer');
         setIsProcessing(false);
         await conn.close();
@@ -174,7 +181,9 @@ export default function ForensicScannerUI() {
     worker.onmessage = (event) => {
       const { type, payload, error } = event.data;
       if (type === 'PROCESS_REPORT_SUCCESS') {
-        setReportData(payload);
+        if (uploadTarget === 'a') setReportA(payload);
+        else setReportB(payload);
+        
         setActiveTab('viewer');
         setIsProcessing(false);
         worker.terminate();
@@ -192,11 +201,40 @@ export default function ForensicScannerUI() {
     reader.readAsText(file);
   };
 
+  const handleComputeDiff = () => {
+    if (!reportA || !reportB) return;
+    setIsProcessing(true);
+    const worker = new Worker('/worker.js');
+    
+    worker.onmessage = (event) => {
+      const { type, payload, error } = event.data;
+      if (type === 'COMPUTE_DIFF_SUCCESS') {
+        setDiffResults(payload);
+        setActiveTab('diff');
+        setIsProcessing(false);
+        worker.terminate();
+      } else if (type === 'COMPUTE_DIFF_ERROR') {
+        alert("Diff Error: " + error);
+        setIsProcessing(false);
+        worker.terminate();
+      }
+    };
+
+    worker.postMessage({ 
+      type: 'COMPUTE_DIFF', 
+      payload: { 
+        filesA: reportA.files || [], 
+        filesB: reportB.files || [] 
+      } 
+    });
+  };
+
+
   // Compute duplicate files based on SHA256
   const dupes = useMemo(() => {
-    if (!reportData?.files) return [];
+    if (!activeReport?.files) return [];
     const groups: Record<string, any[]> = {};
-    reportData.files.forEach((f: any) => {
+    activeReport.files.forEach((f: any) => {
       if (f.sha256 && f.sha256 !== 'SKIPPED_LARGE_FILE' && f.sha256 !== 'HASH_ERROR') {
         if (!groups[f.sha256]) groups[f.sha256] = [];
         groups[f.sha256].push(f);
@@ -211,11 +249,11 @@ export default function ForensicScannerUI() {
         const wastedB = b[1][0].size * (b[1].length - 1);
         return wastedB - wastedA;
       });
-  }, [reportData]);
+  }, [activeReport]);
 
   const filteredFiles = useMemo(() => {
-    if (!reportData?.files) return [];
-    let f = reportData.files;
+    if (!activeReport?.files) return [];
+    let f = activeReport.files;
     if (searchQuery) {
       const q = searchQuery.toLowerCase();
       f = f.filter((file: any) =>
@@ -225,10 +263,10 @@ export default function ForensicScannerUI() {
       );
     }
     return f;
-  }, [reportData, searchQuery]);
+  }, [activeReport, searchQuery]);
 
-  const activeFiles = reportData?.isParquet ? duckDbFiles : filteredFiles;
-  const activeDupes = reportData?.isParquet ? duckDbDupes : dupes;
+  const activeFiles = activeReport?.isParquet ? duckDbFiles : filteredFiles;
+  const activeDupes = activeReport?.isParquet ? duckDbDupes : dupes;
 
   const filesParentRef = useRef<HTMLDivElement>(null);
   const rowVirtualizer = useVirtualizer({
@@ -247,15 +285,15 @@ export default function ForensicScannerUI() {
   });
 
   const chartData = useMemo(() => {
-    if (!reportData?.metadata?.file_type_statistics) return [];
-    return Object.entries(reportData.metadata.file_type_statistics)
+    if (!activeReport?.metadata?.file_type_statistics) return [];
+    return Object.entries(activeReport.metadata.file_type_statistics)
       .map(([lang, stats]: any) => ({
         name: lang,
         size: stats.total_size_bytes,
         count: stats.count
       }))
       .sort((a, b) => b.size - a.size);
-  }, [reportData]);
+  }, [activeReport]);
 
   const COLORS = ['#8884d8', '#8dd1e1', '#82ca9d', '#a4de6c', '#d0ed57', '#ffc658', '#ff7300', '#d0ed57', '#a4de6c'];
 
@@ -275,8 +313,8 @@ export default function ForensicScannerUI() {
     const wasted = activeDupes.reduce((acc, val) => acc + (val[1][0].size * (val[1].length - 1)), 0);
     // Find sum of all files sizes
     let totalSize = 0;
-    if (reportData?.metadata?.total_size_bytes) {
-      totalSize = reportData.metadata.total_size_bytes;
+    if (activeReport?.metadata?.total_size_bytes) {
+      totalSize = activeReport.metadata.total_size_bytes;
     } else {
       totalSize = activeFiles.reduce((acc: number, val: any) => acc + (val.size || 0), 0);
     }
@@ -285,12 +323,12 @@ export default function ForensicScannerUI() {
       { name: 'Unique Content', value: unique, fill: '#10b981' }, // teal
       { name: 'Duplicated / Wasted Space', value: wasted, fill: '#ef4444' } // red
     ];
-  }, [activeDupes, activeFiles, reportData]);
+  }, [activeDupes, activeFiles, activeReport]);
   
   const radarData = useMemo(() => {
-    if (!reportData?.metadata?.file_type_statistics) return [];
+    if (!activeReport?.metadata?.file_type_statistics) return [];
     
-    const stats = Object.entries(reportData.metadata.file_type_statistics)
+    const stats = Object.entries(activeReport.metadata.file_type_statistics)
       .map(([lang, s]: any) => ({
         lang,
         size: s.total_size_bytes,
@@ -313,7 +351,7 @@ export default function ForensicScannerUI() {
       avgSizeNorm: (s.avgSize / maxAvgSize) * 100,
       fullMark: 100,
     }));
-  }, [reportData]);
+  }, [activeReport]);
 
   return (
     <div className="min-h-screen bg-[#0A0A0A] text-[#E0E0E0] selection:bg-[#333333] selection:text-white font-sans antialiased flex flex-col">
@@ -331,12 +369,14 @@ export default function ForensicScannerUI() {
             </div>
           </div>
           <nav className="flex gap-2 bg-[#1A1A1A] p-1 rounded-xl border border-[#222]">
-            {(['script', 'viewer', 'about'] as const).map(tab => (
+            {(['script', 'viewer', 'diff', 'about'] as const).map(tab => (
               <button
                 key={tab}
                 onClick={() => setActiveTab(tab)}
+                disabled={tab === 'diff' && !diffResults}
                 className={`text-sm px-4 py-1.5 rounded-lg capitalize transition-all ${
-                  activeTab === tab ? 'bg-[#333] text-white shadow-sm' : 'text-gray-400 hover:text-white hover:bg-[#222]'
+                  activeTab === tab ? 'bg-[#333] text-white shadow-sm' : 
+                  (tab === 'diff' && !diffResults) ? 'text-gray-600 cursor-not-allowed' : 'text-gray-400 hover:text-white hover:bg-[#222]'
                 }`}
               >
                 {tab}
@@ -416,13 +456,38 @@ export default function ForensicScannerUI() {
         {/* VIEWER TAB */}
         {activeTab === 'viewer' && (
           <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="flex flex-col gap-6 h-full">
-            {!reportData ? (
+            <div className="flex items-center justify-between gap-4 bg-[#141414] p-4 rounded-xl border border-[#222]">
+                <div className="flex gap-2">
+                    <button 
+                        onClick={() => setUploadTarget('a')} 
+                        className={`px-4 py-2 text-xs rounded-lg border transition ${uploadTarget === 'a' ? 'bg-[#333] border-white text-white' : 'bg-[#0A0A0A] border-[#222] text-gray-500'}`}
+                    >
+                        Baseline (Report A) {reportA ? '✓' : ''}
+                    </button>
+                    <button 
+                        onClick={() => setUploadTarget('b')} 
+                        className={`px-4 py-2 text-xs rounded-lg border transition ${uploadTarget === 'b' ? 'bg-[#333] border-white text-white' : 'bg-[#0A0A0A] border-[#222] text-gray-500'}`}
+                    >
+                        Target (Report B) {reportB ? '✓' : ''}
+                    </button>
+                </div>
+                {reportA && reportB && (
+                    <button 
+                        onClick={handleComputeDiff}
+                        className="bg-emerald-500 hover:bg-emerald-600 text-black font-bold px-4 py-2 rounded-lg text-xs transition flex items-center gap-2"
+                    >
+                        <Activity className="w-4 h-4"/> Compute Multi-Diff
+                    </button>
+                )}
+            </div>
+
+            {!activeReport ? (
               <div className="flex flex-col items-center justify-center py-32 border border-dashed border-[#333] rounded-2xl bg-[#141414]">
                 <div className="p-4 bg-[#1A1A1A] rounded-full border border-[#222] mb-6">
                   <FileOutput className="w-8 h-8 text-gray-400" />
                 </div>
-                <h2 className="text-xl font-medium text-white mb-2">Upload Forensic Report</h2>
-                <p className="text-gray-500 text-sm mb-8 max-w-sm text-center">Load the JSON artifact generated by the Python scanner to view the directory topology and metadata.</p>
+                <h2 className="text-xl font-medium text-white mb-2">Upload Report {uploadTarget.toUpperCase()}</h2>
+                <p className="text-gray-500 text-sm mb-8 max-w-sm text-center">Load the JSON artifact for the {uploadTarget === 'a' ? 'baseline' : 'target'} state to enable comparison.</p>
                 {isProcessing ? (
                   <div className="flex items-center gap-3 text-emerald-400 font-mono text-sm">
                     <Activity className="w-4 h-4 animate-pulse" /> Parsing Payload via Worker...
@@ -440,22 +505,22 @@ export default function ForensicScannerUI() {
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                    <div className="bg-[#141414] border border-[#222] p-5 rounded-xl">
                     <p className="text-xs text-gray-500 mb-1 uppercase tracking-wider">Volume</p>
-                    <p className="text-sm font-mono text-white truncate">{reportData.metadata.volume_name}</p>
+                    <p className="text-sm font-mono text-white truncate">{activeReport.metadata.volume_name}</p>
                   </div>
                   <div className="bg-[#141414] border border-[#222] p-5 rounded-xl">
                     <p className="text-xs text-gray-500 mb-1 uppercase tracking-wider">Total Scanned Size</p>
-                    <p className="text-sm font-bold text-white">{formatBytes(reportData.metadata.total_size)}</p>
+                    <p className="text-sm font-bold text-white">{formatBytes(activeReport.metadata.total_size)}</p>
                   </div>
                   <div className="bg-[#141414] border border-[#222] p-5 rounded-xl">
                     <p className="text-xs text-gray-500 mb-1 uppercase tracking-wider">Total Files</p>
-                    <p className="text-sm text-white">{reportData.metadata.total_files?.toLocaleString()}</p>
+                    <p className="text-sm text-white">{activeReport.metadata.total_files?.toLocaleString()}</p>
                   </div>
                   <div className="bg-[#141414] border border-[#222] p-5 rounded-xl flex justify-between items-center">
                     <div>
                       <p className="text-xs text-gray-500 mb-1 uppercase tracking-wider">Duplicate Groups</p>
                       <p className="text-sm text-orange-400 font-bold">{dupes.length.toLocaleString()}</p>
                     </div>
-                    <button onClick={() => setReportData(null)} className="text-xs text-red-400 border border-red-500/30 hover:bg-red-500/10 px-3 py-1 rounded">Close</button>
+                    <button onClick={() => { if(uploadTarget === 'a') setReportA(null); else setReportB(null); }} className="text-xs text-red-400 border border-red-500/30 hover:bg-red-500/10 px-3 py-1 rounded">Close</button>
                   </div>
                 </div>
 
@@ -599,25 +664,25 @@ export default function ForensicScannerUI() {
                           </div>
                         </div>
 
-                        {/* Scan Details */}
+                         {/* Scan Details */}
                         <div className="bg-[#141414] border border-[#222] rounded-xl p-5 flex flex-col">
                           <h3 className="text-sm font-medium text-white mb-4 uppercase tracking-wider border-b border-[#333] pb-2">Scan Details</h3>
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm mt-4">
                              <div>
                                <p className="text-gray-500 mb-1">Root Path</p>
-                               <p className="text-gray-300 font-mono text-xs truncate" title={reportData.metadata.root_path}>{reportData.metadata.root_path}</p>
+                               <p className="text-gray-300 font-mono text-xs truncate" title={activeReport.metadata.root_path}>{activeReport.metadata.root_path}</p>
                              </div>
                              <div>
                                <p className="text-gray-500 mb-1">Hostname</p>
-                               <p className="text-gray-300 font-mono text-xs">{reportData.metadata.hostname}</p>
+                               <p className="text-gray-300 font-mono text-xs">{activeReport.metadata.hostname}</p>
                              </div>
                              <div>
                                <p className="text-gray-500 mb-1">Platform</p>
-                               <p className="text-gray-300 font-mono text-xs">{reportData.metadata.platform}</p>
+                               <p className="text-gray-300 font-mono text-xs">{activeReport.metadata.platform}</p>
                              </div>
                              <div>
                                <p className="text-gray-500 mb-1">Errors</p>
-                               <p className={`font-mono text-xs font-bold ${(reportData.errors?.length || 0) > 0 ? 'text-red-400' : 'text-emerald-400'}`}>{reportData.errors?.length || 0}</p>
+                               <p className={`font-mono text-xs font-bold ${(activeReport.errors?.length || 0) > 0 ? 'text-red-400' : 'text-emerald-400'}`}>{activeReport.errors?.length || 0}</p>
                              </div>
                           </div>
                         </div>
@@ -843,25 +908,112 @@ export default function ForensicScannerUI() {
           </motion.div>
         )}
 
-        {/* ABOUT TAB */}
-        {activeTab === 'about' && (
-          <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="flex flex-col gap-6 max-w-3xl">
-             <div className="bg-[#141414] border border-[#222] rounded-xl p-8">
-              <h2 className="text-xl font-medium text-white mb-4">Forensic Multi-Diff Architecture</h2>
-              <div className="prose prose-invert prose-sm max-w-none text-gray-400">
-                <p>
-                  This visualizer consumes the JSON payloads from the standalone Python deployment script to give you interactive deep dives into filesystem states.
-                </p>
-                <h3 className="text-white mt-8 mb-2">Duplicate Detection Strategy</h3>
-                <p>
-                  Because the python script uses <code>hashlib.sha256</code> on files during the deep-level POSIX traversal, the visualizer can group the exact filesystem objects that contain identical bits—regardless of their path, modification times, permissions, or logical folder locations. By taking the count of copies and the size of the initial file minus 1, we get an exact bytes representation of &quot;wasted&quot; redundant space across a massive volume. 
-                </p>
-                <p className="mt-4">
-                  The visualizer renders these efficiently and surfaces the largest wasters first, drastically simplifying investigations or decluttering routines without needing additional heavy MD5 indexing applications natively.
-                </p>
-              </div>
-             </div>
-          </motion.div>
+        {/* DIFF TAB */}
+        {activeTab === 'diff' && diffResults && (
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex flex-col gap-6">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                    <div className="bg-[#141414] border border-[#222] rounded-xl p-6 border-l-4 border-l-emerald-500">
+                        <div className="flex justify-between items-center mb-2">
+                            <h3 className="text-xs font-bold text-emerald-400 uppercase tracking-widest">Added</h3>
+                            <CheckCircle2 className="w-4 h-4 text-emerald-500" />
+                        </div>
+                        <p className="text-2xl font-medium text-white">{diffResults.added.length.toLocaleString()}</p>
+                        <p className="text-xs text-gray-500 mt-1">New files identified in target.</p>
+                    </div>
+                    <div className="bg-[#141414] border border-[#222] rounded-xl p-6 border-l-4 border-l-red-500">
+                        <div className="flex justify-between items-center mb-2">
+                            <h3 className="text-xs font-bold text-red-400 uppercase tracking-widest">Removed</h3>
+                            <ShieldAlert className="w-4 h-4 text-red-500" />
+                        </div>
+                        <p className="text-2xl font-medium text-white">{diffResults.removed.length.toLocaleString()}</p>
+                        <p className="text-xs text-gray-500 mt-1">Files missing from baseline.</p>
+                    </div>
+                    <div className="bg-[#141414] border border-[#222] rounded-xl p-6 border-l-4 border-l-orange-500">
+                        <div className="flex justify-between items-center mb-2">
+                            <h3 className="text-xs font-bold text-orange-400 uppercase tracking-widest">Modified</h3>
+                            <Activity className="w-4 h-4 text-orange-500" />
+                        </div>
+                        <p className="text-2xl font-medium text-white">{diffResults.modified.length.toLocaleString()}</p>
+                        <p className="text-xs text-gray-500 mt-1">Files with content discrepancies.</p>
+                    </div>
+                </div>
+
+                <div className="bg-[#0F0F0F] border border-[#222] rounded-xl overflow-hidden flex flex-col min-h-[600px]">
+                    <div className="bg-[#141414] border-b border-[#222] p-4 flex gap-4">
+                        <h2 className="text-sm font-medium text-white flex items-center gap-2">
+                            <GripVertical className="w-4 h-4 text-gray-600" />
+                            Multi-Diff Result Set
+                        </h2>
+                    </div>
+                    <div className="flex-1 overflow-auto p-4 space-y-4">
+                        {/* Modified Section */}
+                        {diffResults.modified.length > 0 && (
+                            <div className="space-y-3">
+                                <h3 className="text-xs font-bold text-orange-400 uppercase tracking-widest bg-orange-400/5 px-3 py-1 rounded inline-block">Content Divergence</h3>
+                                <div className="grid gap-2">
+                                    {diffResults.modified.slice(0, 100).map((diff: any, i: number) => (
+                                        <div key={i} className="bg-[#161616] border border-orange-500/20 p-3 rounded-lg flex flex-col gap-2 group hover:bg-[#1A1A1A] transition">
+                                            <div className="flex justify-between items-start">
+                                                <span className="text-sm text-white font-mono truncate">{diff.path}</span>
+                                                <span className="text-[10px] bg-orange-500/10 text-orange-400 px-2 py-0.5 rounded border border-orange-500/20">MODIFIED</span>
+                                            </div>
+                                            <div className="grid grid-cols-2 gap-4">
+                                                <div className="flex flex-col gap-1">
+                                                    <span className="text-[10px] text-gray-600 uppercase">Baseline Hash</span>
+                                                    <span className="text-[10px] font-mono text-gray-400 truncate">{diff.a.sha256}</span>
+                                                </div>
+                                                <div className="flex flex-col gap-1">
+                                                    <span className="text-[10px] text-gray-600 uppercase">Target Hash</span>
+                                                    <span className="text-[10px] font-mono text-orange-400 truncate">{diff.b.sha256}</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Added Section */}
+                        {diffResults.added.length > 0 && (
+                            <div className="space-y-3">
+                                <h3 className="text-xs font-bold text-emerald-400 uppercase tracking-widest bg-emerald-400/5 px-3 py-1 rounded inline-block">New Artifacts</h3>
+                                <div className="grid gap-2">
+                                    {diffResults.added.slice(0, 100).map((file: any, i: number) => (
+                                        <div key={i} className="bg-[#161616] border border-emerald-500/20 p-3 rounded-lg flex justify-between items-center group hover:bg-[#1A1A1A] transition">
+                                            <div className="flex flex-col gap-1 truncate">
+                                                <span className="text-sm text-white font-mono truncate">{file.path}</span>
+                                                <div className="flex gap-3 items-center">
+                                                    <span className="text-[10px] text-gray-600">{formatBytes(file.size)}</span>
+                                                    <span className="text-[10px] text-gray-600 font-mono">{file.sha256?.slice(0, 16)}...</span>
+                                                </div>
+                                            </div>
+                                            <span className="text-[10px] bg-emerald-500/10 text-emerald-400 px-2 py-0.5 rounded border border-emerald-500/20">ADDED</span>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Removed Section */}
+                        {diffResults.removed.length > 0 && (
+                            <div className="space-y-3">
+                                <h3 className="text-xs font-bold text-red-400 uppercase tracking-widest bg-red-400/5 px-3 py-1 rounded inline-block">Deleted Entities</h3>
+                                <div className="grid gap-2">
+                                    {diffResults.removed.slice(0, 100).map((file: any, i: number) => (
+                                        <div key={i} className="bg-[#161616] border border-red-500/20 p-3 rounded-lg flex justify-between items-center group hover:bg-[#1A1A1A] transition">
+                                            <div className="flex flex-col gap-1 truncate opacity-50">
+                                                <span className="text-sm text-white font-mono truncate">{file.path}</span>
+                                                <span className="text-[10px] text-gray-600">{formatBytes(file.size)}</span>
+                                            </div>
+                                            <span className="text-[10px] bg-red-500/10 text-red-400 px-2 py-0.5 rounded border border-red-500/20">REMOVED</span>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            </motion.div>
         )}
       </main>
     </div>
