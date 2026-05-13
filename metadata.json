@@ -1,0 +1,6 @@
+{
+  "name": "Forensic Directory Scanner",
+  "description": "Generates a robust forensic Python script for macOS that maps directory structures, metadata, and languages used without relying on Spotlight.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
